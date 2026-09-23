@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sunset Highway</title>
+<meta name="description" content="A tiny pixel-art sunset drive. It rolls along on its own; grab the wheel to race, collect coins and boost.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&display=swap">
+<style>
+  :root { color-scheme: dark; --ground: #0b0616; --ink: #ffe09a; --gold: #ffbc6b; }
+  html, body { height: 100%; margin: 0; background: #000; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  body { display: grid; place-items: center; padding-inline: 16px; box-sizing: border-box; }
+  .stage { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
+  canvas {
+    display: block; image-rendering: crisp-edges; image-rendering: pixelated;
+    outline: 3px solid #2b1840; outline-offset: 0; box-shadow: 0 0 0 6px #0b0616, 0 0 60px rgba(247, 146, 94, .12);
+  }
+  #mute {
+    font: 12px "Silkscreen", ui-monospace, Menlo, monospace; letter-spacing: .06em;
+    color: var(--ground); background: var(--gold); border: 2px solid #0b0616; box-shadow: 0 3px 0 #0b0616;
+    padding: 6px 10px; cursor: pointer;
+  }
+  #mute:focus-visible, #boost:focus-visible { outline: 2px solid #fff6d8; outline-offset: 3px; }
+  #boost {
+    position: fixed; left: calc(16px + env(safe-area-inset-left, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    width: 76px; height: 76px; border-radius: 50%;
+    font: 13px "Silkscreen", ui-monospace, Menlo, monospace; letter-spacing: .04em;
+    color: #0b0616; background: #ffe09a; border: 3px solid #0b0616; box-shadow: 0 4px 0 #0b0616;
+    touch-action: none; cursor: pointer; display: none;
+  }
+  #boost:active { transform: translateY(3px); box-shadow: 0 1px 0 #0b0616; background: #fff6d8; }
+  @media (pointer: coarse) { #boost { display: block; } }
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="screen" aria-label="Pixel-art car driving itself along a coastal highway into the sunset"></canvas>
+  <button id="mute" type="button">♪ Click for music</button>
+</div>
+<button id="boost" type="button" aria-label="Boost">BOOST</button>
+<script>
+(() => {
+  'use strict';
+
+  const W = 240, H = 135, STEP = 1000 / 60;
+  const PAL = [
+    '#120a24', '#1f1238', '#35184f', '#5a2466', '#8a3470', '#bf4a6e', '#e8676a', '#f7925e', // 0-7 sky
+    '#ffbc6b', '#ffe09a', '#fff6d8',                                                        // 8-10 glow / sun
+    '#0b0616', '#1a0f2c', '#2b1840', '#45255a', '#653466',                                  // 11-15 silhouettes
+    '#ffcf6b', '#6e3a6c', '#a24c72',                                                        // 16 lamps, 17-18 water
+    '#2a1d38', '#3d2b4c', '#e0b45e',                                                        // 19-21 road
+    '#c93a3a', '#7e2036', '#ff9b5e',                                                        // 22-24 player car
+    '#2a2140', '#d8cfe0', '#7d7390', '#ff3b4a',                                             // 25-28 glass, chrome, grey, taillight
+    '#2f7f86', '#d9c9a0'                                                                    // 29-30 other paint
+  ];
+
+  const screen = document.getElementById('screen');
+  const dctx = screen.getContext('2d', { alpha: false });
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const g = off.getContext('2d', { alpha: false });
+  g.imageSmoothingEnabled = false;
+  function px(c, x, y) { g.fillStyle = PAL[c]; g.fillRect(x, y, 1, 1); }
+  function rect(c, x, y, w, h) { if (w <= 0 || h <= 0) return; g.fillStyle = PAL[c]; g.fillRect(x, y, w, h); }
+
+  let seed = 1977;
+  function srnd() { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; }
+  function hash(i) { let h = Math.imul(i ^ 0x5bd1e995, 2654435761) >>> 0; h ^= h >>> 15; return Math.imul(h, 2246822519) >>> 0; }
+  function canvas(w, h, paint) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    paint((col, x, y, ww, hh) => { ctx.fillStyle = PAL[col]; ctx.fillRect(x, y, ww, hh); });
+    return c;
+  }
+
+  // ---------- 3x5 pixel font ----------
+  const FONT = {
+    A: '.#. #.# ### #.# #.#', B: '##. #.# ##. #.# ##.', C: '.## #.. #.. #.. .##', D: '##. #.# #.# #.# ##.',
+    E: '### #.. ##. #.. ###', F: '### #.. ##. #.. #..', G: '.## #.. #.# #.# .##', H: '#.# #.# ### #.# #.#',
+    I: '### .#. .#. .#. ###', J: '..# ..# ..# #.# .#.', K: '#.# #.# ##. #.# #.#', L: '#.. #.. #.. #.. ###',
+    M: '#.# ### ### #.# #.#', N: '##. #.# #.# #.# #.#', O: '.#. #.# #.# #.# .#.', P: '##. #.# ##. #.. #..',
+    Q: '.#. #.# #.# ##. .##', R: '##. #.# ##. #.# #.#', S: '.## #.. .#. ..# ##.', T: '### .#. .#. .#. .#.',
+    U: '#.# #.# #.# #.# ###', V: '#.# #.# #.# #.# .#.', W: '#.# #.# ### ### #.#', X: '#.# #.# .#. #.# #.#',
+    Y: '#.# #.# .#. .#. .#.', Z: '### ..# .#. #.. ###',
+    0: '### #.# #.# #.# ###', 1: '.#. ##. .#. .#. ###', 2: '### ..# ### #.. ###', 3: '### ..# .## ..# ###',
+    4: '#.# #.# ### ..# ..#', 5: '### #.. ### ..# ###', 6: '### #.. ### #.# ###', 7: '### ..# ..# .#. .#.',
+    8: '### #.# ### #.# ###', 9: '### #.# ### ..# ###',
+    '.': '... ... ... ... .#.', ':': '... .#. ... .#. ...', '/': '..# ..# .#. #.. #..', '!': '.#. .#. .#. ... .#.',
+    '-': '... ... ### ... ...', '<': '..# .#. #.. .#. ..#', '>': '#.. .#. ..# .#. #..', '^': '.#. #.# ... ... ...'
+  };
+  const GL = new Uint16Array(128);
+  for (const ch in FONT) {
+    const rows = FONT[ch].split(' ');
+    let bits = 0;
+    for (let r = 0; r < 5; r++) for (let c = 0; c < 3; c++) if (rows[r][c] === '#') bits |= 1 << (r * 3 + c);
+    GL[ch.charCodeAt(0)] = bits;
+  }
+  const textW = (s, k) => (s.length * 4 - 1) * k;
+  function text(s, x, y, c, k, shadow) {
+    k = k || 1;
+    if (shadow !== false) text(s, x + k, y + k, 11, k, false);
+    g.fillStyle = PAL[c];
+    for (let i = 0; i < s.length; i++) {
+      const b = GL[s.charCodeAt(i) & 127];
+      if (!b) continue;
+      for (let q = 0; q < 15; q++) if (b & (1 << q)) g.fillRect(x + (i * 4 + q % 3) * k, y + ((q / 3) | 0) * k, k, k);
+    }
+  }
+  const center = (s, y, c, k) => text(s, ((W - textW(s, k || 1)) >> 1), y, c, k || 1);
+
+  // ---------- sprite builder ----------
+  const E = 255;
+  function sprite(w, h, draw, rimTop, rimMap) {
+    const A = new Uint8Array(w * h).fill(E);
+    const set = (x, y, c) => { if (x >= 0 && y >= 0 && x < w && y < h) A[y * w + x] = c; };
+    const span = (y, x0, x1, c) => { for (let x = x0; x <= x1; x++) set(x, y, c); };
+    draw(set, span);
+    const emp = (x, y) => x < 0 || y < 0 || x >= w || y >= h || A[y * w + x] === E;
+    return canvas(w, h, R => {
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const v = A[y * w + x];
+        if (v === E) { if (!emp(x - 1, y) || !emp(x + 1, y) || !emp(x, y - 1) || !emp(x, y + 1)) R(11, x, y, 1, 1); continue; }
+        let o = v;
+        if (rimTop && emp(x, y - 1)) o = rimMap && rimMap[v] !== undefined ? rimMap[v] : rimTop;
+        R(o, x, y, 1, 1);
+      }
+    });
+  }
+
+  const CARW = 44, CARH = 24;
+  function car(body, shade, roll) {
+    return sprite(CARW, CARH, (set, span) => {
+      for (let y = 15; y <= 23; y++) { span(y, 2, 8, 11); span(y, 35, 41, 11); }
+      for (let y = 16; y <= 22; y += 2) { set(4, y, 12); set(6, y, 12); set(37, y, 12); set(39, y, 12); }
+      for (let y = 12; y <= 19; y++) span(y, 1, 42, y >= 17 ? shade : body);
+      for (let y = 9; y <= 11; y++) span(y, 2, 41, y === 9 ? shade : body);
+      span(9, 1, 42, shade);
+      span(18, 3, 40, 26); span(19, 3, 40, 27);
+      for (let y = 15; y <= 16; y++) span(y, 18, 25, 26);
+      set(19, 15, 13); set(21, 16, 13); set(22, 15, 13); set(24, 16, 13);
+      span(12, 3, 12, 28); span(13, 3, 12, 6); span(14, 3, 12, 28);
+      span(12, 31, 40, 28); span(13, 31, 40, 6); span(14, 31, 40, 28);
+      set(8, 20, 27); set(9, 20, 11); set(34, 20, 11); set(35, 20, 27);
+      const r = roll;
+      span(2, 14 + r, 29 + r, body); span(3, 13 + r, 30 + r, body);
+      for (let y = 4; y <= 7; y++) { span(y, 12 + r, 31 + r, body); span(y, 14 + r, 29 + r, y === 4 ? 7 : y === 5 ? 6 : 5); }
+      span(8, 11 + r, 32 + r, body);
+      for (let y = 6; y <= 7; y++) { span(y, 16 + r, 18 + r, 11); span(y, 25 + r, 27 + r, 11); }
+      set(10 + r, 5, body); set(33 + r, 5, body);
+    }, 9, { 26: 10, 11: 11 });
+  }
+  const PLAYER = [car(22, 23, -1), car(22, 23, 0), car(22, 23, 1)];
+  const CARS = [car(29, 13, 0), car(30, 27, 0), car(14, 12, 0), car(27, 13, 0), car(21, 19, 0)]; // 0-2 rivals, 3-4 civilians
+
+  const PALM = sprite(22, 44, (set) => {
+    let tx = 11;
+    for (let k = 0; k < 34; k++) { tx = 11 + Math.round((k * k) / 400); set(tx, 43 - k, k % 4 === 0 ? 12 : 11); set(tx + 1, 43 - k, 11); }
+    for (let f = 0; f < 7; f++) {
+      const dir = f < 3 ? -1 : f < 6 ? 1 : 0, sp = f % 3;
+      for (let s = 1; s <= 10; s++) {
+        const fx = tx + dir * s, fy = 9 + Math.round((s * s) / (6 + sp * 4)) - (2 - sp) - (dir === 0 ? s : 0);
+        set(fx, fy, 11); set(fx, fy + 1, 12);
+      }
+    }
+  }, 5);
+  const LAMP = sprite(12, 44, (set, span) => {
+    for (let y = 4; y < 44; y++) set(2, y, 11);
+    span(3, 2, 8, 11); span(4, 7, 9, 11); set(8, 5, 16); set(9, 5, 16);
+  }, 0);
+  const BUSH = sprite(18, 10, (set, span) => {
+    for (let y = 0; y < 10; y++) { const hw = Math.round(Math.sqrt(Math.max(0, 1 - ((y - 9) / 9) ** 2)) * 8); span(y, 9 - hw, 8 + hw, 12); }
+  }, 4);
+  const SIGN = sprite(26, 30, (set, span) => {
+    for (let y = 10; y < 30; y++) { set(4, y, 11); set(21, y, 11); }
+    for (let y = 0; y < 11; y++) span(y, 0, 25, y === 0 || y === 10 ? 11 : 29);
+    for (let x = 3; x < 23; x += 2) set(x, 5, 26);
+    set(22, 3, 26); set(23, 4, 26); set(22, 5, 26); set(23, 6, 26); set(22, 7, 26);
+  }, 7);
+
+  // ---------- background ----------
+  const HOR = H >> 1;
+  const sky = canvas(W, H, R => {
+    const stops = [0, 10, 19, 28, 37, 45, 52, 57, 61, 64, HOR + 6];
+    for (let b = 0; b < 10; b++) R(b, 0, stops[b], W, stops[b + 1] - stops[b]);
+    for (let b = 1; b < 10; b++) {
+      const y0 = stops[b];
+      for (let x = 0; x < W; x++) {
+        if (((x + y0) & 1) === 0) R(b, x, y0 - 1, 1, 1);
+        if ((x & 3) === ((y0 >> 1) & 3)) R(b, x, y0 - 2, 1, 1);
+        if (((x + y0) & 1) === 1) R(b - 1, x, y0, 1, 1);
+      }
+    }
+    for (let i = 0; i < 14; i++) R(srnd() < 0.3 ? 9 : 4, (srnd() * W) | 0, (srnd() * 14) | 0, 1, 1);
+    R(17, 0, HOR + 6, W, H - HOR - 6);
+  });
+  const SUNR = 20;
+  const sun = canvas(SUNR * 2 + 20, SUNR * 2 + 20, R => {
+    const c = SUNR + 10;
+    for (let y = -SUNR - 10; y <= SUNR + 10; y++) for (let x = -SUNR - 10; x <= SUNR + 10; x++) {
+      const d = Math.sqrt(x * x + y * y);
+      if (d <= SUNR) { const cut = y > 3 && ((y - 4) % 4 === 0) && y < SUNR - 1; if (!cut) R(d < SUNR - 4 ? 10 : 9, c + x, c + y, 1, 1); }
+      else if (d <= SUNR + 4 && ((x + y) & 1) === 0) R(9, c + x, c + y, 1, 1);
+      else if (d <= SUNR + 9 && (x & 1) === 0 && (y & 1) === 0) R(8, c + x, c + y, 1, 1);
+    }
+  });
+  const CLW = 480;
+  const clouds = canvas(CLW, H, R => {
+    const bank = (x0, y, len) => {
+      for (let i = 0; i < len; i++) {
+        const t = i / len, th = Math.round(Math.sin(t * Math.PI) * 3 + (hash(x0 + i) & 1));
+        if (th <= 0) continue;
+        const x = (x0 + i) % CLW;
+        R(4, x, y - th, 1, th); R(y > 30 ? 7 : 6, x, y, 1, 1);
+      }
+    };
+    bank(20, 24, 90); bank(160, 33, 60); bank(260, 16, 110); bank(400, 40, 70); bank(420, 28, 40);
+  });
+  const BGW = 480;
+  const far = canvas(BGW, H, R => {
+    for (let x = 0; x < BGW; x++) {
+      const y = Math.round(HOR - 6 - 5 * Math.sin(x * 2 * Math.PI / BGW * 3) - 3 * Math.sin(x * 2 * Math.PI / BGW * 7 + 2));
+      R(15, x, y, 1, HOR + 6 - y);
+    }
+    const blds = [[40, 8, 14], [49, 7, 20], [57, 10, 16], [68, 6, 26], [75, 9, 18], [85, 7, 30], [93, 11, 22], [105, 8, 15], [114, 6, 19], [121, 10, 12]];
+    for (const b of blds) {
+      R(14, b[0], HOR + 2 - b[2], b[1], b[2] + 4);
+      for (let y = HOR + 4 - b[2]; y < HOR; y += 3) for (let x = b[0] + 1; x < b[0] + b[1] - 1; x += 2) if (srnd() < 0.2) R(16, x, y, 1, 1);
+    }
+    for (let y = 0; y < 36; y++) { const hw = Math.round(y * 0.18); R(14, 64 - hw, HOR - 34 + y, hw * 2 + 1, 1); }
+    R(14, 64, HOR - 40, 1, 6); R(16, 64, HOR - 41, 1, 1);
+    const d = HOR - 4, t1 = 230, t2 = 350, top = HOR - 30;
+    R(14, 190, d, 200, 2);
+    for (const tx of [t1, t2]) { R(14, tx, top, 2, HOR + 6 - top); R(14, tx + 5, top, 2, HOR + 6 - top); for (let y = top; y < d; y += 7) R(14, tx, y, 7, 1); R(9, tx, top, 2, 1); R(9, tx + 5, top, 2, 1); }
+    for (let x = 190; x < 390; x++) {
+      let cy;
+      if (x >= t1 + 3 && x <= t2 + 3) { const u = (x - (t1 + t2) / 2 - 3) / ((t2 - t1) / 2); cy = Math.round(d - 2 - (d - 2 - top) * u * u); }
+      else if (x < t1 + 3) { const u = (x - 190) / (t1 + 3 - 190); cy = Math.round(d - 1 - (d - 1 - top) * u * u); }
+      else { const u = (390 - x) / (390 - t2 - 3); cy = Math.round(d - 1 - (d - 1 - top) * u * u); }
+      R(15, x, cy, 1, 1); if ((x & 3) === 0) R(15, x, cy + 1, 1, d - cy - 1);
+    }
+    R(15, 0, HOR + 6, BGW, H - HOR - 6);
+  });
+
+  const COIN = [
+    sprite(8, 8, (set, span) => { span(0, 2, 5, 16); for (let y = 1; y < 7; y++) span(y, 0, 7, 16); span(7, 2, 5, 16); for (let y = 1; y < 7; y++) { set(0, y, 8); set(7, y, 8); } set(1, 1, 10); set(2, 1, 9); set(1, 2, 9); for (let y = 2; y < 6; y++) set(4, y, 13); }, 0),
+    sprite(5, 8, (set, span) => { span(0, 1, 3, 16); for (let y = 1; y < 7; y++) span(y, 0, 4, 16); span(7, 1, 3, 16); set(1, 2, 10); for (let y = 2; y < 6; y++) set(3, y, 8); }, 0),
+    sprite(2, 8, (set, span) => { for (let y = 0; y < 8; y++) span(y, 0, 1, y < 3 ? 9 : 8); }, 0)
+  ];
+  const COIN_SEQ = [0, 1, 2, 1];
+
+  // ---------- track (loops forever) ----------
+  const N = 1600, SEGL = 200, ROADW = 1000, CAMH = 900, D = 0.84, DRAW = 150, TRACK = N * SEGL;
+  const segY = new Float32Array(N + 1), segC = new Float32Array(N);
+  const propL = new Uint8Array(N), propR = new Uint8Array(N);
+  for (let i = 0; i <= N; i++) { const t = i / N * 2 * Math.PI; segY[i] = 1800 * Math.sin(t * 3) + 900 * Math.sin(t * 8 + 1); }
+  for (let i = 0; i < N; i++) {
+    const t = i / N * 2 * Math.PI;
+    let c = 2.2 * Math.sin(t * 4) + 1.4 * Math.sin(t * 9 + 2);
+    c = Math.sign(c) * Math.max(0, Math.abs(c) - 0.6) * 1.4;
+    segC[i] = c;
+    const h = hash(i);
+    propL[i] = (i % 12 === 0) ? 2 : 0;
+    propR[i] = (i % 6 === 0) ? 1 : (i % 12 === 3) ? 2 : (h % 23 === 0) ? 4 : (h % 5 === 0) ? 3 : 0;
+  }
+  const PROP_IMG = [null, PALM, LAMP, BUSH, SIGN], PROP_H = [0, 1.1, 1.05, 0.25, 0.6];
+
+  const prI = new Int32Array(DRAW), prX = new Float32Array(DRAW), prY = new Float32Array(DRAW), prW = new Float32Array(DRAW), prClip = new Float32Array(DRAW), prOk = new Uint8Array(DRAW);
+
+  // ---------- traffic ----------
+  const NC = 10, LANES = [-0.62, 0, 0.62];
+  const cDist = new Float64Array(NC), cX = new Float32Array(NC), cTX = new Float32Array(NC), cV = new Float32Array(NC);
+  const cSpr = new Uint8Array(NC), cN = new Int32Array(NC), cRel = new Float32Array(NC), cPrev = new Float32Array(NC), cOn = new Uint8Array(NC);
+
+  // ---------- coins ----------
+  const NCO = 48;
+  const coDist = new Float64Array(NCO), coX = new Float32Array(NCO), coOn = new Uint8Array(NCO), coN = new Int32Array(NCO);
+  let nextCoin = 0;
+
+  // ---------- particles ----------
+  const NP = 160;
+  const pX = new Float32Array(NP), pY = new Float32Array(NP), pVX = new Float32Array(NP), pVY = new Float32Array(NP), pL = new Float32Array(NP), pM = new Float32Array(NP), pK = new Uint8Array(NP);
+  let pCur = 0;
+  function spawn(k, x, y, vx, vy, life) { const i = pCur; pCur = (pCur + 1) % NP; pK[i] = k; pX[i] = x; pY[i] = y; pVX[i] = vx; pVY[i] = vy; pM[i] = pL[i] = life; }
+  const RAMPS = [[26, 27, 15, 14], [9, 8, 7, 18], [10, 9, 8, 7], [10, 16, 7, 6], [9, 7, 13, 12]]; // smoke, dust, sparks, flame, coin
+
+  // popups (+25 CLOSE!, +10)
+  const NPU = 6, puT = new Uint8Array(NPU), puK = new Uint8Array(NPU), puX = new Float32Array(NPU);
+  const PU_TXT = ['+10', '+25 CLOSE!'];
+  let puCur = 0;
+  function popup(k, x) { puK[puCur] = k; puT[puCur] = 50; puX[puCur] = x; puCur = (puCur + 1) % NPU; }
+
+  // ---------- state ----------
+  const TITLE = 0, PLAY = 1, CRASH = 2;
+  let phase = TITLE, pt = 0, tick = 0;
+  let dist = 0, runStart = 0, pos = 0, speed = 110, playerX = 0, bgOff = 0, bounce = 0, roll = 1, shake = 0, offroad = false, flash = 0;
+  let coins = 0, bonus = 0, score = 0, best = 0, newBest = false, boost = 0.5, boosting = false, autoLane = 1, crashSpin = 0;
+  const PLAYERZ = CAMH * D, CRUISE = 200, BOOSTV = 295;
+  const keys = { l: 0, r: 0, dn: 0, b: 0, x: 0 };
+  let touchSteer = 0, touchBoost = false, touchGas = false, touchOn = false;
+  const RELAX = 0, DRIVE = 1;
+  const DEMO = location.hash === '#demo';
+  let steerV = 0, wasBoosting = false, boostFlash = 0;
+  let mode = RELAX, lastInput = -99999, hudT = 0, everDrove = false;
+  try { best = +localStorage.getItem('sunset-run-best') || 0; } catch (e) { best = 0; }
+
+  function relZ(dd) { let r = (dd - dist - PLAYERZ) % TRACK; if (r > TRACK / 2) r -= TRACK; if (r < -TRACK / 2) r += TRACK; return r; }
+  function laneFree(lx, fromZ, span, self) {
+    for (let j = 0; j < NC; j++) { if (j === self || !cOn[j]) continue; const d = cDist[j] - fromZ; if (Math.abs(cX[j] - lx) < 0.4 && d > -300 && d < span) return false; }
+    return true;
+  }
+  function carSpawn(i, ahead) {
+    let z = dist + ahead;
+    for (let tries = 0; tries < 6; tries++) {           // never wall off all three lanes
+      let near = 0;
+      for (let j = 0; j < NC; j++) if (j !== i && cOn[j] && Math.abs(cDist[j] - z) < 1600) near++;
+      if (near < 2) break;
+      z += 2500;
+    }
+    cOn[i] = 1; cDist[i] = z; cV[i] = mode === DRIVE ? 55 + Math.random() * 35 : 38 + Math.random() * 20; cX[i] = cTX[i] = LANES[(Math.random() * 3) | 0];
+    cSpr[i] = (Math.random() * CARS.length) | 0; cPrev[i] = 1e9;
+  }
+  function coinRow() {
+    let lane = (Math.random() * 3) | 0;
+    const n = 5 + ((Math.random() * 4) | 0), zig = Math.random() < 0.4;
+    for (let k = 0; k < n; k++) {
+      let slot = -1;
+      for (let j = 0; j < NCO; j++) if (!coOn[j]) { slot = j; break; }
+      if (slot < 0) return;
+      if (zig && k === (n >> 1)) lane = lane === 1 ? (Math.random() < 0.5 ? 0 : 2) : 1;
+      coOn[slot] = 1; coDist[slot] = nextCoin + k * 420; coX[slot] = LANES[lane];
+    }
+    nextCoin += n * 420 + 3500 + Math.random() * 5000;
+  }
+  function activeCars() { return 5; }
+  function enterDrive() {
+    mode = DRIVE; everDrove = true; initAudio();
+    nextCoin = dist + PLAYERZ + 5000;
+  }
+  function enterRelax() {
+    mode = RELAX; coOn.fill(0);
+    let best = 0; for (let l = 1; l < 3; l++) if (Math.abs(LANES[l] - playerX) < Math.abs(LANES[best] - playerX)) best = l;
+    autoLane = best;
+  }
+
+  function resetRun() {
+    runStart = dist; coins = 0; bonus = 0; score = 0; newBest = false; boost = 0.5; speed = 60; crashSpin = 0; shake = 0; flash = 0;
+    playerX = 0; cOn.fill(0); coOn.fill(0); pL.fill(0); puT.fill(0);
+    for (let i = 0; i < 4; i++) carSpawn(i, PLAYERZ + 9000 + i * 6000);
+    nextCoin = dist + PLAYERZ + 4000;
+  }
+  resetRun();
+  speed = 70; phase = PLAY; coOn.fill(0);
+
+  function startRun() { resetRun(); phase = PLAY; pt = 0; sfxBeep(880, 0.2); }
+  function crash(i) {
+    phase = CRASH; pt = 0; shake = 24; flash = 3; crashSpin = 1;
+    cV[i] = Math.max(cV[i], 60);
+    score = Math.floor((dist - runStart) / 250) + bonus;
+    if (score > best) { best = score; newBest = true; try { localStorage.setItem('sunset-run-best', String(best)); } catch (e) { /* storage unavailable */ } }
+    sfxThud(0.9); sfxCrash();
+    for (let k = 0; k < 40; k++) { const a = Math.random() * 6.28, v = 0.5 + Math.random() * 2.5; spawn(k & 1 ? 3 : 2, W / 2, H - 16, Math.cos(a) * v, Math.sin(a) * v - 1, 20 + Math.random() * 20); }
+  }
+
+  function update() {
+    tick++; pt++;
+    const seg = Math.floor((dist + PLAYERZ) / SEGL) % N, curve = segC[seg];
+
+    // ----- controls: relax autopilot until you touch anything, then it's all yours -----
+    const anyInput = keys.l || keys.r || keys.dn || keys.b || keys.x || touchOn || touchBoost;
+    if (anyInput) { lastInput = tick; if (mode === RELAX) enterDrive(); }
+    else if (mode === DRIVE && tick - lastInput > 420) enterRelax();
+    let steer = 0, brake = false;
+    boosting = false;
+    if (mode === DRIVE) {
+      let want = (keys.r - keys.l) || touchSteer;
+      if (DEMO) {                                    // recording mode (#demo): a tidy driver for capture
+        const here = dist + PLAYERZ, look = 2200 + speed * 16;
+        if (!laneFree(LANES[autoLane], here - 200, look, -1)) {
+          for (let l = 0; l < 3; l++) if (l !== autoLane && laneFree(LANES[l], here - 900, look, -1)) { autoLane = l; break; }
+        } else if (tick % 20 === 0) {
+          let bz = 6000, ln = -1;
+          for (let j = 0; j < NCO; j++) if (coOn[j]) { const r = relZ(coDist[j]); if (r > 400 && r < bz) { const l = coX[j] < -0.3 ? 0 : coX[j] > 0.3 ? 2 : 1; if (laneFree(LANES[l], here - 900, r + 900, -1)) { bz = r; ln = l; } } }
+          if (ln >= 0) autoLane = ln;
+        }
+        if (window.__demoAim) {                      // scripted bump for the recording: line up behind the next car
+          let bz = 1e9;
+          for (let j = 0; j < NC; j++) if (cOn[j]) { const r = relZ(cDist[j]); if (r > 200 && r < bz) { bz = r; autoLane = cX[j] < -0.3 ? 0 : cX[j] > 0.3 ? 2 : 1; } }
+        }
+        want = Math.max(-1, Math.min(1, (LANES[autoLane] - playerX) * 5)) + curve * 0.08 * (speed / 145) * (speed / 145);
+      }
+      steerV += (want - steerV) * 0.18;             // wheel eases in/out instead of snapping
+      steer = steerV;
+      brake = !!keys.dn;
+      boosting = (keys.x || touchBoost) && boost > 0.01;
+      const tv = boosting ? 185 : (keys.b || touchGas) ? 145 : 100;
+      speed += (tv - speed) * (boosting ? 0.035 : 0.015);
+      if (boosting) { boost = Math.max(0, boost - 0.008); sfxBoostTick(); }
+      if (brake) speed = Math.max(35, speed - 1.6);
+    } else {
+      const here = dist + PLAYERZ;
+      if (!laneFree(LANES[autoLane], here - 200, 2600, -1)) {
+        let pick = -1;
+        for (let l = 0; l < 3; l++) if (l !== autoLane && laneFree(LANES[l], here - 900, 3000, -1) && (pick < 0 || Math.abs(l - autoLane) < Math.abs(pick - autoLane))) pick = l;
+        if (pick >= 0) autoLane = pick; else brake = true;
+      }
+      steer = Math.max(-0.35, Math.min(0.35, (LANES[autoLane] - playerX) * 3)) + curve * 0.04;
+      speed += (70 - speed) * 0.01;
+      if (brake) speed -= 0.8;
+    }
+    hudT = Math.max(0, Math.min(1, hudT + (mode === DRIVE ? 0.06 : -0.03)));
+    if (boosting && !wasBoosting) {                 // boost kick-in: spark burst, jolt, whoosh
+      shake = 10; boostFlash = 8; sfxBoostStart();
+      for (let k = 0; k < 24; k++) { const a = Math.PI * (0.15 + Math.random() * 0.7), v = 1 + Math.random() * 2.5, ex = k & 1 ? 35 : 8; spawn(2, (W >> 1) - 22 + ex, H - 10, Math.cos(a) * v * (k & 1 ? 1 : -1), Math.sin(a) * v * 0.6, 14 + Math.random() * 10); }
+    }
+    if (boosting && tick % 8 === 0) shake = Math.max(shake, 2);
+    wasBoosting = boosting;
+    if (boostFlash > 0) boostFlash--;
+    const sp = Math.min(1.2, speed / 145);
+    if (phase !== CRASH) {
+      playerX += steer * 0.034 * Math.min(1, sp * 1.6);
+      playerX -= curve * sp * sp * 0.0027;          // outward drift in bends: ~30% of full steering at top speed
+    }
+    offroad = playerX > 1.05 || playerX < -1.02;
+    if (playerX < -1.18) { playerX = -1.18; if (speed > 40 && mode === DRIVE) { speed *= 0.92; shake = 6; if (tick % 4 === 0) sfxThud(0.25); } for (let k = 0; k < 2; k++) spawn(2, (W >> 1) - 22, H - 12, -1 - Math.random(), -1 - Math.random(), 10); }
+    if (playerX > 1.7) playerX = 1.7;
+    if (offroad && speed > 55) { speed -= 2.4; if (tick % 3 === 0) shake = Math.max(shake, 2); if (Math.random() < 0.8) spawn(1, (W >> 1) - 18 + Math.random() * 36, H - 9, (Math.random() - 0.5) * 1.6, -0.6 - Math.random(), 18); }
+    speed = Math.max(0, speed);
+    dist += speed; pos = ((dist % TRACK) + TRACK) % TRACK;
+    bgOff += curve * speed * 0.0022;
+
+    // ----- traffic -----
+    const act = activeCars();
+    for (let i = 0; i < NC; i++) {
+      if (!cOn[i]) { if (i < act) carSpawn(i, PLAYERZ + 26000 + Math.random() * 8000); continue; }
+      if (!laneFree(cTX[i], cDist[i] + 1, 1400, i)) {
+        for (let l = 0; l < 3; l++) if (laneFree(LANES[l], cDist[i] - 500, 1800, i)) { cTX[i] = LANES[l]; break; }
+        if (!laneFree(cTX[i], cDist[i] + 1, 500, i)) cV[i] *= 0.97;
+      }
+      cX[i] += (cTX[i] - cX[i]) * 0.025;
+      cDist[i] += cV[i];
+      const r = relZ(cDist[i]);
+      if (phase === PLAY) {
+        // hit?
+        if (r > -80 && r < 160 && Math.abs(cX[i] - playerX) < 0.34) {
+          if (mode === DRIVE) {                                                     // bump: lose speed, shake, keep going
+            speed = cV[i] * 0.7; cDist[i] += 220; shake = 12; sfxThud(0.6);
+            for (let k = 0; k < 10; k++) spawn(2, W / 2 + (cX[i] - playerX) * 60, H - 20, (Math.random() - 0.5) * 3, -Math.random() * 2, 14);
+          } else { speed = Math.min(speed, cV[i]); cDist[i] += 120; }
+        }
+        // near miss: just passed it, tight gap
+        if (mode === DRIVE && cPrev[i] >= 0 && r < 0 && Math.abs(cX[i] - playerX) < 0.56) { bonus += 25; popup(1, W / 2 + (cX[i] - playerX) * 60); sfxWhoosh(); }
+      }
+      cPrev[i] = r;
+      if (r < -2500 || r > 40000) { cOn[i] = 0; if (i < act) carSpawn(i, PLAYERZ + 24000 + Math.random() * 10000); }
+    }
+
+    // ----- coins -----
+    if (mode === DRIVE && nextCoin < dist + PLAYERZ + 28000) coinRow();
+    for (let j = 0; j < NCO; j++) {
+      if (!coOn[j]) continue;
+      const r = relZ(coDist[j]);
+      if (phase !== CRASH && r > -60 && r < 180 && Math.abs(coX[j] - playerX) < 0.32) {
+        coOn[j] = 0;
+        if (mode === DRIVE) { coins++; bonus += 10; boost = Math.min(1, boost + 0.2); popup(0, W / 2); sfxCoin(); }
+        for (let k = 0; k < 6; k++) spawn(4, W / 2 + (coX[j] - playerX) * 80, H - 30, (Math.random() - 0.5) * 2, -1 - Math.random(), 16);
+      } else if (r < -800) coOn[j] = 0;
+    }
+
+    if (phase === PLAY) score = Math.floor((dist - runStart) / 250) + bonus;
+    if (phase === CRASH) crashSpin = Math.max(0, crashSpin - 0.01);
+    if (shake > 0) shake--;
+    if (flash > 0) flash--;
+    for (let k = 0; k < NPU; k++) if (puT[k] > 0) puT[k]--;
+
+    // ----- feel -----
+    if (tick % 5 === 0) {
+      const s = steer + curve * 0.2;
+      roll = phase === CRASH ? ((pt >> 2) % 3) : s > 0.3 ? 2 : s < -0.3 ? 0 : 1;
+      bounce = (offroad ? Math.random() < 0.6 : Math.random() < 0.06 + sp * 0.1) ? -1 : 0;
+    }
+    const bx = (W >> 1) - 22, by = H - 31;
+    if (phase === CRASH) {
+      if (tick % 3 === 0) spawn(0, bx + 14 + Math.random() * 16, by + 4, (Math.random() - 0.5) * 0.4, -0.4, 50);
+      if (pt < 90 && tick % 2 === 0) spawn(3, bx + 16 + Math.random() * 12, by + 8, (Math.random() - 0.5) * 0.5, -0.7 - Math.random() * 0.5, 22);
+    } else if (speed > 5 && tick % (boosting ? 1 : 5) === 0) {
+      spawn(boosting ? 3 : 0, bx + 8 + Math.random(), by + 20, -0.15 - Math.random() * 0.2, boosting ? 0.4 : 0.05, boosting ? 10 : 20 + Math.random() * 10);
+      spawn(boosting ? 3 : 0, bx + 35 + Math.random(), by + 20, 0.15 + Math.random() * 0.2, boosting ? 0.4 : 0.05, boosting ? 10 : 20 + Math.random() * 10);
+    }
+    for (let i = 0; i < NP; i++) {
+      if (pL[i] <= 0) continue;
+      pL[i]--; pX[i] += pVX[i]; pY[i] += pVY[i];
+      pVY[i] += pK[i] === 0 ? -0.012 : pK[i] === 3 ? -0.02 : 0.08;
+    }
+    audioTick(mode === DRIVE, sp);
+  }
+
+  // ---------- road renderer ----------
+  const COL = new Uint8Array(5);
+  function roadColors(n, alt) {
+    if (n < 45) { COL[0] = alt ? 20 : 19; COL[1] = alt ? 26 : 28; COL[2] = alt ? 12 : 11; COL[3] = 17; COL[4] = alt ? 26 : 27; }
+    else if (n < 85) { COL[0] = alt ? 14 : 13; COL[1] = alt ? 9 : 6; COL[2] = alt ? 13 : 12; COL[3] = 17; COL[4] = 27; }
+    else if (n < 120) { COL[0] = alt ? 4 : 15; COL[1] = 7; COL[2] = alt ? 14 : 13; COL[3] = 18; COL[4] = 15; }
+    else { COL[0] = alt ? 6 : 5; COL[1] = 8; COL[2] = 15; COL[3] = 5; COL[4] = 5; }
+  }
+  function drawRoad() {
+    const base = Math.floor(pos / SEGL) % N, pct = (pos % SEGL) / SEGL;
+    const pz = pos + PLAYERZ, ps = Math.floor(pz / SEGL) % N, pp = (pz % SEGL) / SEGL;
+    const camY = CAMH + segY[ps] + (segY[ps + 1] - segY[ps]) * pp;
+    const camX = playerX * ROADW;
+    let x = 0, dx = -segC[base] * pct, maxy = H;
+    for (let n = 0; n < DRAW; n++) {
+      const i = (base + n) % N;
+      const z1 = (i + (i < base ? N : 0)) * SEGL - pos, z2 = z1 + SEGL;
+      prOk[n] = 0; prI[n] = i;
+      const x1c = -camX - x, x2c = -camX - x - dx;
+      x += dx; dx += segC[i];
+      if (z1 <= D * 40) continue;
+      const s1 = D / z1, s2 = D / z2;
+      const sx1 = W / 2 + s1 * x1c * W / 2, sy1 = H / 2 - s1 * (segY[i] - camY) * H / 2, sw1 = s1 * ROADW * W / 2;
+      const sx2 = W / 2 + s2 * x2c * W / 2, sy2 = H / 2 - s2 * (segY[i + 1] - camY) * H / 2, sw2 = s2 * ROADW * W / 2;
+      prX[n] = sx1; prY[n] = sy1; prW[n] = sw1; prClip[n] = maxy; prOk[n] = 1;
+      if (sy2 >= sy1 || sy2 >= maxy) continue;
+      const alt = ((i / 3) | 0) & 1;
+      roadColors(n, alt);
+      const y0 = Math.max(0, Math.round(sy2)), y1 = Math.min(Math.round(sy1), maxy);
+      for (let y = y0; y < y1; y++) {
+        const t = (y - sy2) / (sy1 - sy2);
+        const cx = sx2 + (sx1 - sx2) * t, w = sw2 + (sw1 - sw2) * t;
+        const r = Math.max(1, w / 7), rail = Math.max(1, w / 14);
+        const l = Math.round(cx - w), rr = Math.round(cx + w), rl = Math.round(cx - w - r), rrr = Math.round(cx + w + r), rail0 = Math.round(cx - w - r - rail);
+        rect(COL[3], 0, y, rail0, 1);
+        rect(COL[4], rail0, y, rl - rail0, 1);
+        rect(COL[1], rl, y, l - rl, 1);
+        rect(COL[0], l, y, rr - l, 1);
+        rect(COL[1], rr, y, rrr - rr, 1);
+        rect(COL[2], rrr, y, W - rrr, 1);
+        if (alt && n < 110) {
+          const lw = Math.max(1, Math.round(w / 40));
+          rect(21, Math.round(cx - w / 3 - lw / 2), y, lw, 1);
+          rect(21, Math.round(cx + w / 3 - lw / 2), y, lw, 1);
+        }
+        const hsh = hash(y * 977 + ((tick / 6) | 0));
+        if (rail0 > 4 && (hsh & 3) === 0) px(n < 60 ? 18 : 9, hsh % rail0, y);
+      }
+      maxy = y0;
+    }
+  }
+
+  function drawScaled(img, cx, bottom, dh, clip) {
+    const dw = dh * img.width / img.height;
+    if (dh < 2 || dw < 1) return;
+    let dy = Math.round(bottom - dh), h = Math.round(dh), sh = img.height;
+    const dxp = Math.round(cx - dw / 2), w = Math.max(1, Math.round(dw));
+    if (dy + h > clip) { const vis = Math.round(clip) - dy; if (vis <= 0) return; sh = img.height * vis / h; h = vis; }
+    if (dxp > W || dxp + w < 0) return;
+    g.drawImage(img, 0, 0, img.width, sh, dxp, dy, w, h);
+  }
+  function lerpProj(n, dd, out) {
+    const f = (((dd % SEGL) + SEGL) % SEGL) / SEGL, m = n + 1 < DRAW && prOk[n + 1] ? n + 1 : n;
+    out[0] = prX[n] + (prX[m] - prX[n]) * f; out[1] = prY[n] + (prY[m] - prY[n]) * f; out[2] = prW[n] + (prW[m] - prW[n]) * f;
+  }
+  const LP = new Float32Array(3);
+  function drawCarAt(i, n) {
+    if (!prOk[n]) return;
+    lerpProj(n, cDist[i], LP);
+    drawScaled(CARS[cSpr[i]], LP[0] + cX[i] * LP[2], LP[1], 0.37 * LP[2] * CARH / CARW, prClip[n]);
+    // taillight glow on far cars
+    if (LP[2] < 60 && (tick & 8)) px(28, Math.round(LP[0] + cX[i] * LP[2]), Math.round(LP[1] - 0.1 * LP[2]));
+  }
+  function drawCoinAt(j, n) {
+    if (!prOk[n]) return;
+    lerpProj(n, coDist[j], LP);
+    const img = COIN[COIN_SEQ[((tick >> 3) + j) & 3]], dh = 0.15 * LP[2];
+    drawScaled(img, LP[0] + coX[j] * LP[2], LP[1] - 0.07 * LP[2] - ((tick >> 4) & 1) * 0.02 * LP[2], dh, prClip[n]);
+  }
+  function segOf(dd, base) { return (Math.floor((((dd % TRACK) + TRACK) % TRACK) / SEGL) - base + N) % N; }
+  function drawSprites() {
+    const base = Math.floor(pos / SEGL) % N;
+    for (let i = 0; i < NC; i++) {
+      cRel[i] = (((cDist[i] - pos) % TRACK) + TRACK) % TRACK;
+      cN[i] = !cOn[i] || cRel[i] > TRACK - 4000 ? -1 : segOf(cDist[i], base);
+    }
+    for (let j = 0; j < NCO; j++) coN[j] = coOn[j] ? segOf(coDist[j], base) : -1;
+    for (let n = DRAW - 1; n > 0; n--) {
+      if (!prOk[n]) continue;
+      const i = prI[n], x = prX[n], y = prY[n], w = prW[n], clip = prClip[n];
+      if (propR[i]) drawScaled(PROP_IMG[propR[i]], x + w * (propR[i] === 4 ? 1.5 : 1.45), y, PROP_H[propR[i]] * w, clip);
+      if (propL[i]) drawScaled(LAMP, x - w * 1.32, y, PROP_H[2] * w, clip);
+      for (let j = 0; j < NCO; j++) if (coN[j] === n && n > 5) drawCoinAt(j, n);
+      for (let k = 0; k < NC; k++) if (cN[k] === n && cRel[k] >= PLAYERZ) drawCarAt(k, n);
+    }
+  }
+  function drawNearCars() {
+    for (let n = 6; n >= 0; n--) for (let k = 0; k < NC; k++) if (cN[k] === n && cRel[k] < PLAYERZ) drawCarAt(k, n);
+  }
+
+  // exhaust flame shooting back toward the camera: 4 frames, rows of [half-width, colour]
+  const FLAME = [
+    [[1, 10], [2, 10], [2, 9], [3, 9], [3, 8], [2, 8], [2, 7], [1, 6], [0, 6]],
+    [[1, 10], [2, 10], [3, 9], [3, 9], [4, 8], [3, 8], [3, 7], [2, 7], [1, 6], [0, 5]],
+    [[1, 10], [2, 9], [2, 9], [3, 8], [2, 8], [2, 7], [1, 6], [0, 6]],
+    [[1, 10], [2, 10], [3, 10], [4, 9], [4, 8], [4, 8], [3, 7], [2, 7], [2, 6], [1, 5], [0, 5]]
+  ];
+  function drawFlame(x, y, f) {
+    const fr = FLAME[f];
+    for (let r = 0; r < fr.length; r++) {
+      const hw = fr[r][0];
+      if (((r + tick) & 1) === 0) { px(7, x - hw - 2, y + r); px(7, x + hw + 2, y + r); }   // dithered glow
+      rect(fr[r][1], x - hw, y + r, hw * 2 + 1, 1);
+    }
+    if (f & 1) { px(10, x + (f === 1 ? -5 : 5), y + 2); px(9, x + (f === 1 ? 4 : -4), y + 5); }  // stray sparks
+  }
+  function speedLines() {
+    for (let k = 0; k < 14; k++) {
+      const hsh = hash(k * 7919 + ((tick / 2) | 0)), a = (hsh % 628) / 100, r0 = 58 + (hsh >> 10) % 30, len = 6 + (hsh >> 16) % 10;
+      const ca = Math.cos(a), sa = Math.sin(a) * 0.6;
+      for (let s = 0; s < len; s += 1) px(s < 3 ? 10 : 9, Math.round(W / 2 + ca * (r0 + s)), Math.round(H / 2 + sa * (r0 + s)));
+    }
+  }
+
+  const TOUCH = matchMedia('(pointer: coarse)').matches;
+  const HINTS = TOUCH ? ['LEFT SIDE  <', 'RIGHT SIDE >', 'MIDDLE   GAS', 'BTN    BOOST'] : ['< >   STEER', '^       GAS', 'V     BRAKE', 'SHIFT BOOST'];
+  const START = TOUCH ? 'TOUCH THE SCREEN TO DRIVE' : 'PRESS ANY ARROW TO DRIVE';
+  function drawHUD() {
+    // always-on control hint: a small column in the corner
+    const hx = TOUCH ? W - 4 - textW(HINTS[0], 1) : 5;
+    rect(11, hx - 3, H - 39, textW(HINTS[0], 1) + 6, HINTS.length * 7 + 5);
+    rect(12, hx - 2, H - 38, textW(HINTS[0], 1) + 4, HINTS.length * 7 + 3);
+    for (let k = 0; k < HINTS.length; k++) text(HINTS[k], hx, H - 36 + k * 7, 27, 1);
+    // yellow call to action while the car is driving itself
+    if (mode === RELAX) center(START, H - 42, 16, 1);
+    if (mode === RELAX && hudT === 0) return;
+    const y = Math.round((1 - hudT) * -16) + 4;
+    g.drawImage(COIN[0], 4, y, 5, 5);
+    text('' + coins, 11, y, 16, 1);
+    const sc = 'SCORE ' + bonus;
+    text(sc, (W - textW(sc, 1)) >> 1, y, 9, 1);
+    const mph = Math.round(speed * 0.62) + ' MPH';
+    text(mph, W - 4 - textW(mph, 1), y, 8, 1);
+    text('BOOST', W - 58, y + 7, boost > 0.01 ? 7 : 15, 1);
+    rect(11, W - 37, y + 7, 34, 5);
+    rect(boosting ? ((tick >> 1) & 1 ? 10 : 9) : 21, W - 36, y + 8, Math.round(boost * 32), 3);
+    for (let k = 0; k < NPU; k++) if (puT[k] > 0) {
+      const s = PU_TXT[puK[k]], yy = H - 40 - (50 - puT[k]) / 2;
+      text(s, Math.round(puX[k] - textW(s, 1) / 2), Math.round(yy), puK[k] ? 10 : 16, 1);
+    }
+    if (offroad && mode === DRIVE && (tick >> 3) & 1) center(playerX < 0 ? 'WALL!' : 'OFF ROAD!', 40, 6, 1);
+  }
+
+  function render() {
+    g.drawImage(sky, 0, 0);
+    const so = Math.round(bgOff);
+    g.drawImage(sun, Math.round(W / 2 - SUNR - 10 - so * 0.5), HOR - SUNR - 4);
+    let o = ((Math.round(bgOff * 0.3) % CLW) + CLW) % CLW;
+    g.drawImage(clouds, -o, 0); if (CLW - o < W) g.drawImage(clouds, CLW - o, 0);
+    o = ((so % BGW) + BGW) % BGW;
+    g.drawImage(far, -o, 0); if (BGW - o < W) g.drawImage(far, BGW - o, 0);
+
+    drawRoad();
+    drawSprites();
+    if (boosting) speedLines();
+
+    const bx = (W >> 1) - 22 + (phase === CRASH ? Math.round(Math.sin(pt * 0.5) * 3 * crashSpin) : 0), by = H - 31 + bounce + (boosting ? 1 : 0);
+    rect(11, bx + 1, by + 23 - (boosting ? 1 : 0), 42, 2);
+    for (let i = 0; i < NP; i++) {
+      if (pL[i] <= 0) continue;
+      const f = 1 - pL[i] / pM[i], ramp = RAMPS[pK[i]], c = ramp[Math.min(3, (f * 4) | 0)], s = pK[i] === 0 ? 1 + ((f * 3) | 0) : pK[i] === 3 ? 2 - ((f * 2) | 0) : 1;
+      rect(c, Math.round(pX[i]) - (s >> 1), Math.round(pY[i]), s, s);
+    }
+    g.drawImage(PLAYER[roll], bx, by);
+    if (keys.dn && phase === PLAY) { rect(10, bx + 3, by + 13, 10, 1); rect(10, bx + 31, by + 13, 10, 1); }
+    if (boosting) { const f = (tick >> 2) & 3; drawFlame(bx + 8, by + 21, f); drawFlame(bx + 35, by + 21, (f + 2) & 3); }
+    if (boostFlash > 0) { const r = 10 - boostFlash; for (let a = 0; a < 16; a++) { const an = a / 16 * 6.283; px(boostFlash > 4 ? 10 : 9, Math.round(bx + 22 + Math.cos(an) * r * 2.2), Math.round(by + 20 + Math.sin(an) * r * 0.7)); } }
+    for (let x = 0; x < 10; x += 2) { px(5, bx + 3 + x + (tick >> 3 & 1), by + 25); px(5, bx + 31 + x + (tick >> 3 & 1), by + 25); }
+    drawNearCars();
+    if (flash > 0) rect(10, 0, 0, W, H);
+    drawHUD();
+
+    const sx = shake > 0 ? ((shake & 2) ? 1 : -1) * (shake > 8 ? 2 : 1) : 0, sy = shake > 0 ? ((shake & 4) ? 1 : 0) : 0;
+    dctx.fillStyle = PAL[11];
+    dctx.fillRect(0, 0, screen.width, screen.height);
+    dctx.drawImage(off, 0, 0, W, H, ox + sx * scale, oy + sy * scale, W * scale, H * scale);
+  }
+  // ---------- audio: original synthwave loop, engine, sfx ----------
+  let musicF = null;
+  let ac = null, master = null, musicBus = null, sfxBus = null, eng1 = null, eng2 = null, engF = null, engG = null, rumbleG = null, noiseBuf = null;
+  let muted = false, nextT = 0, step = 0, cycle = 0;
+  const BPM = 104, S16 = 60 / BPM / 4;
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+  const PROG = [[45, 57, 60, 64], [41, 57, 60, 65], [48, 55, 60, 64], [43, 55, 59, 62]]; // Am F C G: bass root + triad
+  const LEAD = [[76, 0, 74, 72, 0, 69, 0, 0], [72, 0, 69, 0, 65, 67, 69, 0], [67, 0, 64, 0, 67, 0, 72, 0], [71, 0, 74, 0, 71, 69, 67, 0]];
+
+  function initAudio() {
+    if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+    try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { ac = null; return; }
+    const label = () => { muteBtn.textContent = ac.state !== 'running' ? '♪ Click for music' : muted ? '♪ Sound off' : '♪ Sound on'; };
+    ac.onstatechange = label; label();
+    master = ac.createGain(); master.gain.value = muted ? 0 : 0.8; master.connect(ac.destination);
+    musicBus = ac.createGain(); musicBus.gain.value = 0.16; musicF = ac.createBiquadFilter(); musicF.type = 'lowpass'; musicF.frequency.value = 700; musicF.Q.value = 0.8; musicBus.connect(musicF).connect(master);
+    sfxBus = ac.createGain(); sfxBus.gain.value = 0.5; sfxBus.connect(master);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    // engine
+    eng1 = ac.createOscillator(); eng1.type = 'sawtooth';
+    eng2 = ac.createOscillator(); eng2.type = 'square'; eng2.detune.value = 8;
+    engF = ac.createBiquadFilter(); engF.type = 'lowpass'; engF.frequency.value = 500; engF.Q.value = 4;
+    engG = ac.createGain(); engG.gain.value = 0;
+    const e2g = ac.createGain(); e2g.gain.value = 0.5;
+    eng1.connect(engF); eng2.connect(e2g).connect(engF); engF.connect(engG).connect(sfxBus);
+    eng1.start(); eng2.start();
+    // off-road rumble
+    const rn = ac.createBufferSource(); rn.buffer = noiseBuf; rn.loop = true;
+    const rf = ac.createBiquadFilter(); rf.type = 'lowpass'; rf.frequency.value = 260;
+    rumbleG = ac.createGain(); rumbleG.gain.value = 0;
+    rn.connect(rf).connect(rumbleG).connect(sfxBus); rn.start();
+    nextT = ac.currentTime + 0.1;
+    setInterval(schedule, 25);
+  }
+  function env(gn, t, vol, a, dur) {
+    gn.gain.setValueAtTime(0.0001, t);
+    gn.gain.exponentialRampToValueAtTime(vol, t + a);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  }
+  function tone(type, midi, t, dur, vol, cutoff, bus) {
+    const o = ac.createOscillator(), gn = ac.createGain();
+    o.type = type; o.frequency.value = mtof(midi);
+    if (cutoff) { const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cutoff; o.connect(f).connect(gn); } else o.connect(gn);
+    gn.connect(bus || musicBus); env(gn, t, vol, 0.008, dur);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  function noise(t, dur, vol, type, freq, bus) {
+    const s = ac.createBufferSource(), f = ac.createBiquadFilter(), gn = ac.createGain();
+    s.buffer = noiseBuf; f.type = type; f.frequency.value = freq;
+    s.connect(f).connect(gn).connect(bus || musicBus); env(gn, t, vol, 0.002, dur);
+    s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.05);
+  }
+  function kick(t) {
+    const o = ac.createOscillator(), gn = ac.createGain();
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+    o.connect(gn).connect(musicBus); env(gn, t, 0.9, 0.003, 0.28);
+    o.start(t); o.stop(t + 0.3);
+  }
+  function pad(chord, t, dur) {
+    for (let k = 1; k < 4; k++) {
+      const o = ac.createOscillator(), f = ac.createBiquadFilter(), gn = ac.createGain();
+      o.type = 'sawtooth'; o.frequency.value = mtof(chord[k]); o.detune.value = (k - 2) * 7;
+      f.type = 'lowpass'; f.frequency.value = 1100;
+      o.connect(f).connect(gn).connect(musicBus);
+      gn.gain.setValueAtTime(0.0001, t); gn.gain.linearRampToValueAtTime(0.045, t + 0.35);
+      gn.gain.setValueAtTime(0.045, t + dur - 0.2); gn.gain.linearRampToValueAtTime(0.0001, t + dur);
+      o.start(t); o.stop(t + dur + 0.05);
+    }
+  }
+  function playStep(s, t) {
+    const bar = s >> 4, i = s & 15, ch = PROG[bar];
+    if (mode === RELAX) {
+      // lo-fi half-time: soft kick, brushed snare, long bass, pad, sparse arp
+      if (i === 0 || i === 10) kick(t);
+      if (i === 8) noise(t, 0.22, 0.12, 'bandpass', 1400);
+      if (i % 4 === 2) noise(t, 0.03, 0.03, 'highpass', 8000);
+      if (i === 0 || i === 8) tone('triangle', ch[0], t, S16 * 7, 0.12, 500);
+      if (i % 4 === 0) tone('triangle', ch[1 + ((i >> 2) % 3)] + 12, t, S16 * 3, 0.035, 1400);
+      if (i === 0) pad(ch, t, S16 * 16);
+      return;
+    }
+    if (i % 8 === 0) kick(t);
+    if (i === 4 || i === 12) { noise(t, 0.16, 0.35, 'bandpass', 1800); tone('triangle', 50, t, 0.08, 0.2); }
+    if (i % 2 === 0) noise(t, 0.035, i % 4 === 2 ? 0.14 : 0.07, 'highpass', 7500);
+    if (i % 2 === 0) tone('square', ch[0] + (i % 4 === 2 ? 12 : 0), t, S16 * 1.7, 0.08, 650);
+    tone('triangle', ch[1 + (i % 3)] + 12 + ((i >> 2) & 1) * 12, t, S16 * 0.9, 0.045, 2400);
+    if (i === 0) pad(ch, t, S16 * 16);
+    if (i % 2 === 0) { const m = LEAD[bar][i >> 1]; if (m) tone('square', m, t, S16 * 3, 0.055, 1800); }
+  }
+  function schedule() {
+    if (!ac) return;
+    while (nextT < ac.currentTime + 0.12) {
+      playStep(step, nextT);
+      nextT += S16; step = (step + 1) % 64;
+      if (step === 0) cycle++;
+    }
+  }
+  function audioTick(running, sp) {
+    if (!ac || tick % 3) return;
+    const gears = [0, 40, 75, 110, 150, 190];
+    let gi = 0; while (gi < 4 && speed >= gears[gi + 1]) gi++;
+    const frac = Math.min(1, (speed - gears[gi]) / (gears[gi + 1] - gears[gi]));
+    const f = 42 + frac * 62 + gi * 7;
+    const t = ac.currentTime;
+    eng1.frequency.setTargetAtTime(f, t, 0.05);
+    eng2.frequency.setTargetAtTime(f * 0.5, t, 0.05);
+    engF.frequency.setTargetAtTime(280 + frac * 700 + (boosting ? 1100 : (keys.b || touchGas) ? 500 : 250), t, 0.08);
+    engG.gain.setTargetAtTime(running ? 0.06 + sp * 0.03 : 0.0001, t, running ? 0.1 : 0.6);
+    rumbleG.gain.setTargetAtTime(offroad && speed > 30 ? 0.5 : 0, t, 0.05);
+    musicF.frequency.setTargetAtTime(running ? 12000 : 1500, t, 0.4);
+    musicBus.gain.setTargetAtTime(running ? 0.24 : 0.16, t, 0.6);   // quiet while cruising, a bit louder when you drive
+  }
+  function sfxBeep(f, dur) { if (!ac) return; const o = ac.createOscillator(), gn = ac.createGain(); o.type = 'square'; o.frequency.value = f; o.connect(gn).connect(sfxBus); env(gn, ac.currentTime, 0.18, 0.005, dur); o.start(); o.stop(ac.currentTime + dur + 0.05); }
+  function sfxThud(v) { if (!ac) return; noise(ac.currentTime, 0.25, v, 'lowpass', 500, sfxBus); tone('sine', 30, ac.currentTime, 0.2, v * 0.8, 0, sfxBus); }
+  function sfxCrash() { if (!ac) return; const t = ac.currentTime; noise(t, 0.9, 0.7, 'lowpass', 1400, sfxBus); noise(t + 0.05, 0.5, 0.4, 'highpass', 3000, sfxBus); [60, 55, 48].forEach((m, k) => tone('square', m, t + 0.25 + k * 0.18, 0.25, 0.1, 1200, sfxBus)); }
+  function sfxCoin() { if (!ac) return; const t = ac.currentTime; tone('square', 88, t, 0.06, 0.09, 5000, sfxBus); tone('square', 95, t + 0.06, 0.14, 0.09, 5000, sfxBus); }
+  function sfxWhoosh() { if (!ac) return; noise(ac.currentTime, 0.3, 0.3, 'bandpass', 900, sfxBus); tone('triangle', 84, ac.currentTime + 0.05, 0.12, 0.08, 4000, sfxBus); }
+  function sfxBoostStart() { if (!ac) return; const t = ac.currentTime; noise(t, 0.5, 0.4, 'bandpass', 1200, sfxBus); tone('sawtooth', 40, t, 0.35, 0.12, 900, sfxBus); tone('square', 76, t + 0.02, 0.12, 0.06, 3000, sfxBus); }
+  function sfxBoostTick() { if (!ac || tick % 12) return; noise(ac.currentTime, 0.25, 0.12, 'bandpass', 2400, sfxBus); }
+
+  const muteBtn = document.getElementById('mute');
+  function toggleMute() {
+    muted = !muted;
+    muteBtn.textContent = muted ? '♪ Sound off' : '♪ Sound on';
+    if (master) master.gain.setTargetAtTime(muted ? 0 : 0.8, ac.currentTime, 0.05);
+  }
+  muteBtn.addEventListener('pointerdown', e => e.stopPropagation());
+  muteBtn.addEventListener('click', e => { e.stopPropagation(); if (!ac || ac.state !== 'running') initAudio(); else toggleMute(); });
+
+  // ---------- input: arrows / WASD, or touch (left third, right third, middle = gas) ----------
+  const KEYMAP = { ArrowLeft: 'l', KeyA: 'l', ArrowRight: 'r', KeyD: 'r', ArrowUp: 'b', KeyW: 'b', Space: 'b', ArrowDown: 'dn', KeyS: 'dn', ShiftLeft: 'x', ShiftRight: 'x', KeyX: 'x' };
+  addEventListener('keydown', e => {
+    if (e.code === 'KeyM') { if (!ac) { initAudio(); muteBtn.textContent = '♪ Sound on'; } else toggleMute(); return; }
+    const k = KEYMAP[e.code];
+    if (k) { e.preventDefault(); keys[k] = 1; initAudio(); if (muteBtn.textContent === '♪ Click for music') muteBtn.textContent = '♪ Sound on'; }
+  });
+  addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) keys[k] = 0; });
+  const pointers = new Map();
+  function recompute() {
+    let st = 0, gas = false;
+    pointers.forEach(x => { const r = x / innerWidth; if (r < 0.33) st -= 1; else if (r > 0.67) st += 1; else gas = true; });
+    touchSteer = Math.max(-1, Math.min(1, st)); touchGas = gas; touchOn = pointers.size > 0;
+  }
+  addEventListener('pointerdown', e => {
+    const silent = !ac || ac.state !== 'running';
+    initAudio();
+    if (silent && mode === RELAX) return;            // first tap only turns the chill music on
+    pointers.set(e.pointerId, e.clientX); recompute();
+  });
+  addEventListener('pointermove', e => { if (pointers.has(e.pointerId)) { pointers.set(e.pointerId, e.clientX); recompute(); } });
+  const lift = e => { pointers.delete(e.pointerId); recompute(); };
+  addEventListener('pointerup', lift);
+  addEventListener('pointercancel', lift);
+  addEventListener('blur', () => { pointers.clear(); recompute(); touchBoost = false; keys.l = keys.r = keys.dn = keys.b = keys.x = 0; });
+  const boostBtn = document.getElementById('boost');
+  boostBtn.addEventListener('pointerdown', e => { e.stopPropagation(); initAudio(); if (muteBtn.textContent === '♪ Click for music') muteBtn.textContent = '♪ Sound on'; touchBoost = true; boostBtn.setPointerCapture(e.pointerId); });
+  const unboost = e => { e.stopPropagation(); touchBoost = false; };
+  boostBtn.addEventListener('pointerup', unboost);
+  boostBtn.addEventListener('pointercancel', unboost);
+
+  // ---------- scaling + loop ----------
+  let scale = 1, ox = 0, oy = 0;
+  // fixed little game window: 3x pixels at most, shrinks to fit small screens, always whole device pixels
+  const MAX_SCALE = 3;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const fit = Math.min((innerWidth - 32) / W, (innerHeight - 90) / H, MAX_SCALE);
+    scale = Math.max(1, Math.floor(fit * dpr));
+    screen.width = W * scale; screen.height = H * scale;
+    screen.style.width = (W * scale / dpr) + 'px'; screen.style.height = (H * scale / dpr) + 'px';
+    ox = 0; oy = 0;
+    dctx.imageSmoothingEnabled = false;
+  }
+  addEventListener('resize', resize);
+  resize();
+  initAudio();                                       // plays right away where the browser allows it
+
+  let last = performance.now(), acc = 0;
+  function frame(now) {
+    let dt = now - last; last = now;
+    if (dt > 250) dt = 250;
+    acc += dt;
+    while (acc >= STEP) { update(); acc -= STEP; }
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
